@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # ===== 核心框架 =====
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
@@ -47,6 +48,7 @@ numpy==1.26.2  # 数值计算
 # ===== 认证与安全 =====
 python-jose[cryptography]==3.3.0  # JWT 处理
 passlib[bcrypt]==1.7.4  # 密码加密
+bcrypt==4.0.1  # 与 passlib 1.7.4 兼容的 bcrypt 版本
 python-multipart==0.0.6  # 表单数据
 
 # ===== 限流与防护 =====
