@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.logger import setup_logger, logger
 from app.infrastructure.database import init_db, close_db
 from app.infrastructure.redis import init_redis, close_redis
+from app.infrastructure.vector_store import init_vector_store, close_vector_store
 from app.middleware.logging import LoggingMiddleware
 from app.middleware.error_handler import (
     AppException,
@@ -50,6 +51,14 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Redis 初始化失败: {e}")
         raise
 
+    # 初始化向量存储
+    try:
+        await init_vector_store()
+        logger.info("✅ 向量存储初始化成功")
+    except Exception as e:
+        logger.warning(f"⚠️ 向量存储初始化失败: {e}")
+        # 不抛出异常，允许应用在没有向量存储的情况下运行
+
     logger.info("=" * 60)
     logger.info(f"✅ {settings.APP_NAME} 启动完成！")
     logger.info(f"📍 API 文档: http://localhost:8000/docs")
@@ -68,6 +77,10 @@ async def lifespan(app: FastAPI):
     # 关闭 Redis 连接
     await close_redis()
     logger.info("✅ Redis 连接已关闭")
+
+    # 关闭向量存储连接
+    await close_vector_store()
+    logger.info("✅ 向量存储连接已关闭")
 
     logger.info("👋 应用已安全退出")
 
@@ -100,11 +113,12 @@ app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 # ===== 注册路由 =====
-# 注意：路由将在后续步骤中添加
-# from app.api.v1 import auth, documents, rag, agents, conversations
-# app.include_router(auth.router, prefix="/api/v1", tags=["认证"])
-# app.include_router(documents.router, prefix="/api/v1", tags=["文档管理"])
-# app.include_router(rag.router, prefix="/api/v1", tags=["RAG问答"])
+from app.api.v1 import auth, documents, rag
+
+app.include_router(auth.router, prefix="/api/v1", tags=["认证"])
+app.include_router(documents.router, prefix="/api/v1", tags=["文档管理"])
+app.include_router(rag.router, prefix="/api/v1", tags=["RAG问答"])
+# 注意：多Agent、对话管理路由将在后续添加
 # app.include_router(agents.router, prefix="/api/v1", tags=["多Agent协作"])
 # app.include_router(conversations.router, prefix="/api/v1", tags=["对话管理"])
 

@@ -47,10 +47,6 @@ services:
       - "${CHROMA_PORT:-8001}:8000"
     volumes:
       - chroma_data:/chroma/chroma
-    environment:
-      - CHROMA_SERVER_AUTH_CREDENTIALS_FILE=/chroma/auth.txt
-      - CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER=chromadb.auth.token.TokenAuthServerProvider
-      - CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.token.TokenAuthProvider
     networks:
       - ai_gateway_network
 

@@ -39,6 +39,18 @@ class Settings(BaseSettings):
     # ===== 向量数据库配置 =====
     CHROMA_HOST: str = Field(default="localhost", description="ChromaDB 主机")
     CHROMA_PORT: int = Field(default=8001, description="ChromaDB 端口")
+    CHROMA_EMBEDDING_MODEL_URL: str = Field(
+        default="https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz",
+        description="Chroma 默认 embedding 模型下载地址"
+    )
+    CHROMA_EMBEDDING_CACHE_DIR: str = Field(
+        default="~/.cache/chroma/onnx_models/all-MiniLM-L6-v2",
+        description="Chroma embedding 模型缓存目录"
+    )
+    CHROMA_EMBEDDING_DOWNLOAD_TIMEOUT_SECONDS: int = Field(
+        default=1800,
+        description="Chroma embedding 模型下载超时时间（秒）"
+    )
 
     # ===== OpenAI API 配置 =====
     OPENAI_API_KEY: str = Field(default="", description="OpenAI API Key")

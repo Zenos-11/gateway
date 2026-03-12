@@ -16,6 +16,37 @@ from app.core.logger import logger
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
+def parse_user_id_claim(user_id_value: Any) -> Optional[int]:
+    """
+    将 JWT 中的用户 ID claim 规范化为整数。
+
+    Args:
+        user_id_value: JWT 中的用户 ID 原始值
+
+    Returns:
+        转换后的整数用户 ID，无法转换时返回 None
+    """
+    if user_id_value is None or isinstance(user_id_value, bool):
+        return None
+
+    if isinstance(user_id_value, int):
+        return user_id_value
+
+    if isinstance(user_id_value, str):
+        normalized_value = user_id_value.strip()
+        if not normalized_value:
+            return None
+
+        try:
+            return int(normalized_value)
+        except ValueError:
+            logger.warning(f"JWT 用户 ID 格式无效: {user_id_value}")
+            return None
+
+    logger.warning(f"JWT 用户 ID 类型无效: {type(user_id_value).__name__}")
+    return None
+
+
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
     验证密码
@@ -170,7 +201,7 @@ def extract_user_id_from_token(token: str) -> Optional[int]:
     if payload is None:
         return None
 
-    return payload.get("sub") or payload.get("user_id")
+    return parse_user_id_claim(payload.get("sub") or payload.get("user_id"))
 
 
 class TokenData:
@@ -192,7 +223,7 @@ class TokenData:
             TokenData 实例
         """
         return cls(
-            user_id=payload.get("sub") or payload.get("user_id"),
+            user_id=parse_user_id_claim(payload.get("sub") or payload.get("user_id")),
             username=payload.get("username"),
             exp=datetime.fromtimestamp(payload.get("exp", 0)) if payload.get("exp") else None,
             type=payload.get("type")
@@ -206,6 +237,7 @@ __all__ = [
     "create_refresh_token",
     "decode_token",
     "verify_token",
+    "parse_user_id_claim",
     "extract_user_id_from_token",
     "TokenData",
 ]

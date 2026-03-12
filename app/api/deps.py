@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database import get_db
 from app.infrastructure.redis import get_redis
-from app.core.security import verify_token
+from app.core.security import verify_token, parse_user_id_claim
 from app.core.logger import logger
 from app.models.database import User
 
@@ -47,11 +47,12 @@ async def get_current_user_id(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user_id = payload.get("sub") or payload.get("user_id")
+    raw_user_id = payload.get("sub") or payload.get("user_id")
+    user_id = parse_user_id_claim(raw_user_id)
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="令牌中缺少用户信息",
+            detail="令牌中的用户信息无效",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
