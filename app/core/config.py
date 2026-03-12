@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     )
 
     # ===== OpenAI API 配置 =====
-    OPENAI_API_KEY: str = Field(default="sk-4d6e671585284c19b12a2fa9eba546b3", description="OpenAI API Key")
+    OPENAI_API_KEY: str = Field(default="your-openai-api-key", description="OpenAI API Key")
     OPENAI_API_BASE: str = Field(
         default="https://api.deepseek.com",
         description="DEEPSEEK API Base URL"

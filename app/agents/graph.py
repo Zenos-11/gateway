@@ -15,7 +15,7 @@
 """
 import json
 import os
-from typing import Annotated, AsyncGenerator, Dict, Sequence, TypedDict
+from typing import Annotated, Any, AsyncGenerator, Dict, Sequence, TypedDict
 
 import operator
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
@@ -44,18 +44,54 @@ class AgentState(TypedDict):
 
 # ===== LLM 工厂 =====
 
-def _build_llm(temperature: float = 0.7) -> ChatOpenAI:
+def _build_llm(temperature: float = 0.7, model: str | None = None) -> ChatOpenAI:
     """
     根据配置构建 ChatOpenAI 实例。
     在没有配置 API Key 时降级为 dummy 模式，保证本地可运行。
     """
     return ChatOpenAI(
-        model=settings.DEFAULT_MODEL,
+        model=model or settings.DEFAULT_MODEL,
         temperature=temperature,
         openai_api_key=settings.OPENAI_API_KEY or "sk-placeholder",
         openai_api_base=settings.OPENAI_API_BASE,
         streaming=True,
     )
+
+
+def _is_model_not_exist_error(error: Exception) -> bool:
+    """判断是否是模型不存在错误（DeepSeek / OpenAI 兼容接口通用）。"""
+    return "model not exist" in str(error).lower() or "model_not_found" in str(error).lower()
+
+
+def _get_fallback_model() -> str | None:
+    """在 DeepSeek 接口下，返回保底可用模型名。"""
+    if "api.deepseek.com" in settings.OPENAI_API_BASE.lower():
+        return "deepseek-chat"
+    return None
+
+
+async def _ainvoke_with_fallback(
+    llm: ChatOpenAI,
+    messages: list,
+    temperature: float = 0.7,
+) -> Any:
+    """
+    调用 LLM，若遇到模型不存在错误则自动回退到保底模型重试。
+    """
+    try:
+        return await llm.ainvoke(messages)
+    except Exception as error:
+        fallback = _get_fallback_model()
+        if _is_model_not_exist_error(error) and fallback and llm.model_name != fallback:
+            logger.warning(
+                f"⚠️ Agent 模型 {llm.model_name} 不可用，自动回退到 {fallback}"
+            )
+            fallback_llm = _build_llm(temperature=temperature, model=fallback)
+            # 如果原 llm 绑定了工具，同样绑定到回退实例上
+            if hasattr(llm, "kwargs") and llm.kwargs.get("tools"):
+                fallback_llm = fallback_llm.bind_tools(llm.kwargs["tools"])
+            return await fallback_llm.ainvoke(messages)
+        raise
 
 
 # ===== 节点函数定义 =====
@@ -113,7 +149,9 @@ async def rag_agent_node(state: AgentState) -> Dict:
     )
 
     try:
-        response = await llm.ainvoke([system_msg, HumanMessage(content=user_input)])
+        response = await _ainvoke_with_fallback(
+            llm, [system_msg, HumanMessage(content=user_input)], temperature=0.3
+        )
         answer = response.content
     except Exception as e:
         logger.error(f"❌ RAG Agent LLM 调用失败: {e}")
@@ -144,7 +182,9 @@ async def code_agent_node(state: AgentState) -> Dict:
     )
 
     try:
-        response = await llm.ainvoke([system_msg, HumanMessage(content=user_input)])
+        response = await _ainvoke_with_fallback(
+            llm, [system_msg, HumanMessage(content=user_input)], temperature=0.2
+        )
         answer = response.content
     except Exception as e:
         logger.error(f"❌ Code Agent LLM 调用失败: {e}")
@@ -169,7 +209,9 @@ async def general_agent_node(state: AgentState) -> Dict:
     )
 
     try:
-        response = await llm.ainvoke([system_msg, HumanMessage(content=user_input)])
+        response = await _ainvoke_with_fallback(
+            llm, [system_msg, HumanMessage(content=user_input)], temperature=0.7
+        )
         answer = response.content or "我明白了，但暂时没有更多信息可以提供。"
     except Exception as e:
         logger.error(f"❌ General Agent LLM 调用失败: {e}")
