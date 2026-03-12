@@ -10,17 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database import get_db
 from app.services.auth_service import AuthService
+from app.api.deps import require_current_user, User
+from app.core.security import verify_token, create_access_token
+from app.core.config import settings
 from app.core.logger import logger
+from datetime import timedelta
 
 router = APIRouter()
 
 
-async def _mock_current_user() -> None:
-    """临时依赖：返回未认证状态。"""
-    return None
-
-
-# ===== 请求/响应模型 =====
 class RegisterRequest(BaseModel):
     """注册请求"""
     username: str = Field(..., min_length=3, max_length=50, description="用户名")
@@ -32,6 +30,11 @@ class LoginRequest(BaseModel):
     """登录请求"""
     email: EmailStr = Field(..., description="邮箱")
     password: str = Field(..., description="密码")
+
+
+class RefreshRequest(BaseModel):
+    """Token 刷新请求"""
+    refresh_token: str = Field(..., description="刷新令牌")
 
 
 class UserResponse(BaseModel):
@@ -129,25 +132,69 @@ async def login(
 
 
 @router.get("/auth/me", summary="获取当前用户", response_model=UserResponse)
-async def get_current_user(
-    current_user: Any = Depends(_mock_current_user),
+async def get_current_user_info(
+    current_user: User = Depends(require_current_user),
 ):
     """
-    获取当前登录用户的信息
-
-    注意：此接口需要认证（待实现）
+    获取当前登录用户的信息，需要携带有效的 Bearer Token。
     """
-    if current_user is None:
-        # 临时返回测试用户
-        return UserResponse(
-            id=1,
-            username="testuser",
-            email="test@example.com",
-            role="admin",
-            quota_used=0,
-            quota_limit=10000,
+    return UserResponse(
+        id=current_user.id,
+        username=current_user.username,
+        email=current_user.email,
+        role=current_user.role,
+        quota_used=current_user.quota_used,
+        quota_limit=current_user.quota_limit,
+    )
+
+
+@router.post("/auth/refresh", summary="刷新访问令牌")
+async def refresh_token(
+    request: RefreshRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    使用 refresh_token 换取新的 access_token。
+    refresh_token 本身不会刷新，过期后用户需重新登录。
+    """
+    payload = verify_token(request.refresh_token, token_type="refresh")
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="刷新令牌无效或已过期",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-    return current_user
+
+    user_id = payload.get("sub")
+    username = payload.get("username")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="令牌中缺少用户信息",
+        )
+
+    # 验证用户是否仍然有效（防止已被禁用的用户刷新 Token）
+    auth_service = AuthService(db)
+    user = await auth_service.get_current_user(int(user_id))
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户不存在或已被禁用",
+        )
+
+    new_access_token = create_access_token(
+        data={"sub": str(user.id), "username": user.username},
+        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+
+    return {
+        "success": True,
+        "data": {
+            "access_token": new_access_token,
+            "token_type": "bearer",
+            "expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        },
+    }
 
 
 @router.post("/auth/logout", summary="用户登出")

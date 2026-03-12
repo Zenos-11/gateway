@@ -16,7 +16,7 @@ from app.core.logger import logger
 
 
 @tool
-async def rag_search(query: str, top_k: int = 5) -> str:
+async def rag_search(query: str, top_k: int = 5, user_id: Optional[int] = None) -> str:
     """
     从知识库向量数据库中检索与 query 最相关的文档片段。
     当需要回答与已上传文档相关的问题时，应优先调用此工具。
@@ -24,6 +24,7 @@ async def rag_search(query: str, top_k: int = 5) -> str:
     Args:
         query: 检索关键词或问题描述
         top_k: 返回最多多少条结果（默认5）
+        user_id: 当前用户 ID（用于按用户隔离检索结果，防止跨用户数据泄露）
 
     Returns:
         格式化后的检索结果字符串，每条结果包含序号和内容
@@ -32,7 +33,11 @@ async def rag_search(query: str, top_k: int = 5) -> str:
         from app.infrastructure.vector_store import get_vector_store
 
         vector_store = await get_vector_store()
-        results = await vector_store.search(query=query, n_results=top_k)
+        results = await vector_store.search(
+            query=query,
+            n_results=top_k,
+            where={"user_id": user_id} if user_id else None,
+        )
 
         if not results:
             return "知识库中未找到相关文档。请尝试换一种提问方式。"

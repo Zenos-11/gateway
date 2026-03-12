@@ -4,7 +4,7 @@
 
 核心设计思路（回字形路由）：
     用户消息 → 路由节点（supervisor）
-        ↓ 判断意图
+        ↓ 判断意图（LLM 分类器）
       rag_agent          → 知识库检索 + 回答
       code_agent         → 代码生成 / 分析
       general_agent      → 通用 LLM 问答
@@ -15,7 +15,7 @@
 """
 import json
 import os
-from typing import Annotated, Any, AsyncGenerator, Dict, Sequence, TypedDict
+from typing import Annotated, Any, AsyncGenerator, Dict, Optional, Sequence, TypedDict
 
 import operator
 from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, SystemMessage
@@ -40,6 +40,8 @@ class AgentState(TypedDict):
     next_agent: str
     # 当前用户消息原文（方便子 Agent 直接使用）
     user_input: str
+    # 用户 ID（用于 RAG 检索时按用户隔离数据）
+    user_id: Optional[int]
 
 
 # ===== LLM 工厂 =====
@@ -96,25 +98,46 @@ async def _ainvoke_with_fallback(
 
 # ===== 节点函数定义 =====
 
+# Supervisor 使用的意图分类 Prompt
+_SUPERVISOR_SYSTEM_PROMPT = """你是一个智能路由助手，负责判断用户问题应该由哪个专家 Agent 来处理。
+
+请分析用户的问题，仅输出以下三个选项之一，不要附加任何其他文字：
+- rag_agent：当用户询问需要从文档、知识库、上传资料中检索信息的问题时选择
+- code_agent：当用户需要编写代码、调试程序、分析代码逻辑、解释技术实现时选择
+- general_agent：所有其他通用问题、日常对话、常识问答时选择
+
+只输出一个选项，不要有前缀、后缀或解释。"""
+
+
 async def supervisor_node(state: AgentState) -> Dict:
     """
-    路由节点（Supervisor）
+    路由节点（Supervisor）- 使用 LLM 意图分类器
     分析用户意图，决定由哪个子 Agent 来处理。
     意图分类：rag_agent / code_agent / general_agent
     """
     user_input = state.get("user_input", "")
 
-    # 简单关键词路由（生产中可换成 LLM 分类器或 ReAct 规划器）
-    code_keywords = ["代码", "函数", "程序", "bug", "error", "python", "def ", "class "]
-    rag_keywords = ["文档", "知识库", "搜索", "检索", "查找", "资料", "根据", "文件"]
+    # 使用 LLM 分类器而非关键词路由，更准确地理解用户意图
+    llm = _build_llm(temperature=0.0)  # temperature=0 保证路由结果稳定可预测
+    try:
+        response = await _ainvoke_with_fallback(
+            llm,
+            [
+                SystemMessage(content=_SUPERVISOR_SYSTEM_PROMPT),
+                HumanMessage(content=user_input),
+            ],
+            temperature=0.0,
+        )
+        next_agent = response.content.strip().lower()
 
-    lower_input = user_input.lower()
+        # 防御：若 LLM 输出了非法值，回退到 general_agent
+        valid_agents = {"rag_agent", "code_agent", "general_agent"}
+        if next_agent not in valid_agents:
+            logger.warning(f"⚠️ Supervisor LLM 输出非法值: '{next_agent}'，回退到 general_agent")
+            next_agent = "general_agent"
 
-    if any(kw in lower_input for kw in code_keywords):
-        next_agent = "code_agent"
-    elif any(kw in lower_input for kw in rag_keywords):
-        next_agent = "rag_agent"
-    else:
+    except Exception as e:
+        logger.error(f"❌ Supervisor LLM 分类失败: {e}，回退到 general_agent")
         next_agent = "general_agent"
 
     logger.info(f"🧭 Supervisor 路由决策: {next_agent} (输入: {user_input[:50]}...)")
@@ -131,12 +154,16 @@ async def rag_agent_node(state: AgentState) -> Dict:
     """
     RAG 检索专家 Agent
     调用 rag_search 工具检索知识库，再用 LLM 生成基于文档的回答。
+    传递 user_id 确保只在当前用户自己的文档范围内检索，防止跨用户数据泄露。
     """
     user_input = state.get("user_input", "")
+    user_id = state.get("user_id")
     logger.info(f"📚 RAG Agent 处理: {user_input[:50]}")
 
-    # 调用 rag_search 工具
-    search_result = await RAG_TOOLS[0].ainvoke({"query": user_input, "top_k": 5})
+    # 调用 rag_search 工具，携带 user_id 进行权限隔离
+    search_result = await RAG_TOOLS[0].ainvoke(
+        {"query": user_input, "top_k": 5, "user_id": user_id}
+    )
 
     # 构建 RAG 回答提示词
     llm = _build_llm(temperature=0.3)  # RAG 场景温度低一些，确保答案忠实于文档
@@ -276,17 +303,24 @@ agent_graph = create_agent_graph()
 async def run_agent_stream(
     user_message: str,
     conversation_history: list[dict] | None = None,
+    user_id: int | None = None,
 ) -> AsyncGenerator[Dict, None]:
     """
-    以流式模式运行 Agent 图，逐步 yield LangGraph 事件字典。
+    以流式模式运行 Agent 图，逐步 yield 格式化事件字典。
+
+    使用 astream_events(version="v2") 实现 token 级流式输出：
+    - 每个 LLM token 产生时立即推送，而非等待节点完成后再发送
+    - 前端可用 SSE 消费此生成器，实现打字机效果
 
     Args:
         user_message: 用户当前输入
         conversation_history: 历史消息列表（可选），格式:
             [{"role": "user" | "assistant", "content": "..."}]
+        user_id: 当前用户 ID（传递给 RAG 检索以隔离数据）
 
     Yields:
-        LangGraph 内部事件字典，包含节点名称和输出的 state
+        统一格式的事件字典：
+        {"type": "thinking"|"token"|"done"|"error", "agent": str, "content": str}
     """
     # 构建初始消息列表
     messages: list[BaseMessage] = []
@@ -303,11 +337,85 @@ async def run_agent_stream(
         "messages": messages,
         "next_agent": "",
         "user_input": user_message,
+        "user_id": user_id,
     }
 
-    # astream_events 会逐步 yield 每个节点执行后的状态快照
-    async for event in agent_graph.astream(initial_state):
-        yield event
+    # astream_events v2：每个 LLM token 都会产生 on_chat_model_stream 事件
+    try:
+        async for event in agent_graph.astream_events(initial_state, version="v2"):
+            event_name = event.get("event", "")
+            event_data = event.get("data", {})
+            # 从 metadata 中提取当前节点名（LangGraph v2 格式）
+            metadata = event.get("metadata", {})
+            node_name = metadata.get("langgraph_node", "")
+
+            if event_name == "on_chat_model_stream":
+                # LLM 正在逐 token 输出
+                chunk = event_data.get("chunk")
+                if chunk and hasattr(chunk, "content") and chunk.content:
+                    event_type = "thinking" if node_name == "supervisor" else "token"
+                    yield {
+                        "type": event_type,
+                        "agent": node_name or "unknown",
+                        "content": chunk.content,
+                    }
+
+            elif event_name == "on_chain_end" and node_name:
+                # 节点执行完毕，推送节点完成信号（可选，帮助前端更新状态）
+                output = event_data.get("output", {})
+                if isinstance(output, dict) and "next_agent" in output:
+                    # supervisor 路由完成，告知前端即将进入哪个 Agent
+                    yield {
+                        "type": "routing",
+                        "agent": "supervisor",
+                        "content": output["next_agent"],
+                    }
+
+        yield {"type": "done", "agent": "system", "content": ""}
+
+    except Exception as e:
+        logger.error(f"❌ Agent 流式运行失败: {e}")
+        yield {"type": "error", "agent": "system", "content": str(e)}
 
 
-__all__ = ["AgentState", "agent_graph", "run_agent_stream", "create_agent_graph"]
+async def run_agent(
+    user_message: str,
+    conversation_history: list[dict] | None = None,
+    user_id: int | None = None,
+) -> str:
+    """
+    同步（非流式）运行 Agent 图，等待所有节点完成后返回最终答案文本。
+
+    Args:
+        user_message: 用户当前输入
+        conversation_history: 历史消息列表（可选）
+        user_id: 当前用户 ID
+
+    Returns:
+        最终 Agent 输出的文本内容
+    """
+    messages: list[BaseMessage] = []
+    if conversation_history:
+        for msg in conversation_history:
+            if msg["role"] == "user":
+                messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                messages.append(AIMessage(content=msg["content"]))
+
+    messages.append(HumanMessage(content=user_message))
+
+    initial_state: AgentState = {
+        "messages": messages,
+        "next_agent": "",
+        "user_input": user_message,
+        "user_id": user_id,
+    }
+
+    final_state = await agent_graph.ainvoke(initial_state)
+
+    # 从最终消息列表中提取最后一条非 supervisor 的 AI 消息
+    for msg in reversed(final_state.get("messages", [])):
+        if isinstance(msg, AIMessage) and getattr(msg, "name", "") != "supervisor":
+            return msg.content
+
+__all__ = ["AgentState", "agent_graph", "run_agent", "run_agent_stream", "create_agent_graph"]

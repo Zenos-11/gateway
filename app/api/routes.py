@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database import get_db
 from app.api.deps import require_current_user, User
-from app.agents.graph import run_agent_stream
+from app.agents.graph import run_agent, run_agent_stream
 from app.models.database import Conversation, Message
 from app.core.config import settings
 from app.core.logger import logger
@@ -87,22 +87,12 @@ async def agents_chat(
         request.conversation_id, current_user.id, db
     )
 
-    final_answer = ""
-    agent_events = []
-
     try:
-        async for event in run_agent_stream(request.message, history):
-            for node_name, node_state in event.items():
-                new_messages = node_state.get("messages", [])
-                for msg in reversed(new_messages):
-                    if hasattr(msg, "content") and msg.content:
-                        final_answer = msg.content
-                        break
-                agent_events.append({
-                    "node": node_name,
-                    "message_count": len(new_messages),
-                })
-
+        final_answer = await run_agent(
+            user_message=request.message,
+            conversation_history=history,
+            user_id=current_user.id,
+        )
     except Exception as e:
         logger.error(f"❌ Agent 对话失败: {e}")
         raise HTTPException(
@@ -114,7 +104,6 @@ async def agents_chat(
         "success": True,
         "data": {
             "answer": final_answer,
-            "agent_trace": agent_events,
         },
     }
 
@@ -130,7 +119,8 @@ async def agents_chat_stream(
 
     每推进一个节点，立即推送一个 SSE 事件：
     - `thinking`: Supervisor 路由决策
-    - `token`: 子 Agent 输出的文本片段
+    - `routing`: Supervisor 决定的目标 Agent
+    - `token`: 子 Agent 输出的文本片段（token 级实时推送）
     - `done`: 全部完成
     - `error`: 处理出错
     """
@@ -140,24 +130,18 @@ async def agents_chat_stream(
 
     async def _generate():
         try:
-            async for event in run_agent_stream(request.message, history):
-                for node_name, node_state in event.items():
-                    event_type = "thinking" if node_name == "supervisor" else "token"
-                    new_messages = node_state.get("messages", [])
-
-                    for msg in new_messages:
-                        if hasattr(msg, "content") and msg.content:
-                            payload = json.dumps(
-                                {"type": event_type, "agent": node_name, "content": msg.content},
-                                ensure_ascii=False,
-                            )
-                            yield f"data: {payload}\n\n"
-
-            yield f"data: {json.dumps({'type': 'done', 'agent': 'system', 'content': ''}, ensure_ascii=False)}\n\n"
-
+            async for event in run_agent_stream(
+                request.message,
+                history,
+                user_id=current_user.id,
+            ):
+                # event 已经是 {"type", "agent", "content"} 格式，直接序列化推送
+                payload = json.dumps(event, ensure_ascii=False)
+                yield f"data: {payload}\n\n"
         except Exception as e:
             logger.error(f"❌ Agent SSE 失败: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'agent': 'system', 'content': str(e)}, ensure_ascii=False)}\n\n"
+            err = json.dumps({"type": "error", "agent": "system", "content": str(e)}, ensure_ascii=False)
+            yield f"data: {err}\n\n"
 
     return StreamingResponse(
         _generate(),
@@ -226,15 +210,8 @@ async def agents_websocket(
 
                 history = await _get_conversation_history(conversation_id, user_id, db)
 
-                async for event in run_agent_stream(user_message, history):
-                    for node_name, node_state in event.items():
-                        for msg in node_state.get("messages", []):
-                            if hasattr(msg, "content") and msg.content:
-                                await websocket.send_json({
-                                    "type": "token",
-                                    "agent": node_name,
-                                    "content": msg.content,
-                                })
+                async for event in run_agent_stream(user_message, history, user_id=user_id):
+                    await websocket.send_json(event)
 
                 await websocket.send_json({"type": "done", "agent": "system", "content": ""})
 
