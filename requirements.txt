@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # ===== 核心框架 =====
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
@@ -20,7 +21,7 @@ asyncpg==0.29.0  # PostgreSQL 异步驱动
 alembic==1.12.1  # 数据库迁移
 
 # ===== 向量数据库 =====
-chromadb==0.4.18  # 向量数据库
+chromadb>=1.0.0,<2.0.0  # 向量数据库（兼容 Chroma v2 API）
 pgvector==0.2.4  # PostgreSQL 向量扩展（可选）
 
 # ===== Redis 缓存 =====
@@ -28,7 +29,7 @@ redis==5.0.1
 hiredis==2.2.3  # Redis 性能优化
 
 # ===== HTTP 客户端 =====
-httpx==0.25.2  # 异步 HTTP 客户端
+httpx>=0.27.0,<0.29.0  # 异步 HTTP 客户端（与 chromadb 兼容）
 aiohttp==3.9.1  # 异步 HTTP
 
 # ===== 文档处理 =====
@@ -47,6 +48,7 @@ numpy==1.26.2  # 数值计算
 # ===== 认证与安全 =====
 python-jose[cryptography]==3.3.0  # JWT 处理
 passlib[bcrypt]==1.7.4  # 密码加密
+bcrypt==4.0.1  # 与 passlib 1.7.4 兼容的 bcrypt 版本
 python-multipart==0.0.6  # 表单数据
 
 # ===== 限流与防护 =====
@@ -69,7 +71,7 @@ python-dateutil==2.8.2  # 日期处理
 # ===== 开发工具 =====
 pytest==7.4.3
 pytest-asyncio==0.21.1
-httpx==0.25.2  # 测试客户端
+httpx>=0.27.0,<0.29.0  # 测试客户端
 black==23.12.1  # 代码格式化
 flake8==6.1.0  # 代码检查
 mypy==1.7.1  # 类型检查

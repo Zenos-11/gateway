@@ -207,38 +207,42 @@ docker-compose logs -f celery_worker
 
 ## 🛠️ 技术栈
 
-| 类别 | 技术 | 用途 |
-|------|------|------|
-| **Web 框架** | FastAPI | 高性能异步 API |
-| **AI 编排** | LangGraph | 多 Agent 工作流 |
-| **LLM 框架** | LangChain | LLM 抽象层 |
-| **数据库** | PostgreSQL + pgvector | 关系型数据 + 向量存储 |
-| **缓存** | Redis | 会话缓存、限流 |
-| **向量数据库** | ChromaDB | 文档向量存储 |
-| **任务队列** | Celery + Redis | 异步任务处理 |
-| **监控** | Prometheus + Grafana | 指标监控 |
+| 类别           | 技术                  | 用途                  |
+| -------------- | --------------------- | --------------------- |
+| **Web 框架**   | FastAPI               | 高性能异步 API        |
+| **AI 编排**    | LangGraph             | 多 Agent 工作流       |
+| **LLM 框架**   | LangChain             | LLM 抽象层            |
+| **数据库**     | PostgreSQL + pgvector | 关系型数据 + 向量存储 |
+| **缓存**       | Redis                 | 会话缓存、限流        |
+| **向量数据库** | ChromaDB              | 文档向量存储          |
+| **任务队列**   | Celery + Redis        | 异步任务处理          |
+| **监控**       | Prometheus + Grafana  | 指标监控              |
 
 ## 📝 开发路线图
 
 ### Phase 1: 基础框架 ✅
+
 - [x] 项目结构搭建
 - [x] 数据库设计
 - [x] 基础 API 框架
 - [x] Docker 部署配置
 
 ### Phase 2: RAG 系统
+
 - [ ] 文档上传与解析
 - [ ] 向量化与存储
 - [ ] 混合检索实现
 - [ ] RAG Agent 开发
 
 ### Phase 3: 多 Agent 系统
+
 - [ ] Multi-Agent Graph 编排
 - [ ] 研究员 Agent
 - [ ] 程序员 Agent
 - [ ] 审查员 Agent
 
 ### Phase 4: 优化与部署
+
 - [ ] 性能优化
 - [ ] 缓存策略
 - [ ] 错误处理
