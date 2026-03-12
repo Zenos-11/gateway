@@ -2,9 +2,11 @@
 RAG 查询服务
 整合向量检索和 LLM 生成
 """
-from typing import List, Dict, Any, Optional
+from typing import AsyncGenerator, List, Dict, Any, Optional
+import json
 import time
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 from openai import AsyncOpenAI
 
@@ -29,6 +31,96 @@ class RAGService:
                 base_url=settings.OPENAI_API_BASE,
             )
         return self.llm_client
+
+    @staticmethod
+    def _is_model_not_exist_error(error: Exception) -> bool:
+        """判断是否是模型不存在错误。"""
+        error_text = str(error).lower()
+        return "model not exist" in error_text or "model_not_found" in error_text
+
+    @staticmethod
+    def _is_deepseek_base_url() -> bool:
+        """判断当前是否使用 DeepSeek OpenAI 兼容接口。"""
+        return "api.deepseek.com" in settings.OPENAI_API_BASE.lower()
+
+    @classmethod
+    def _get_fallback_model(cls, failed_model: str) -> Optional[str]:
+        """根据失败模型返回可回退模型。"""
+        if cls._is_deepseek_base_url() and failed_model != "deepseek-chat":
+            return "deepseek-chat"
+        return None
+
+    async def _create_completion_with_fallback(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str],
+        temperature: Optional[float],
+    ) -> tuple[Any, str]:
+        """创建非流式补全，模型不存在时自动回退。"""
+        llm_client = self._get_llm_client()
+        selected_model = model or settings.DEFAULT_MODEL
+
+        try:
+            response = await llm_client.chat.completions.create(
+                model=selected_model,
+                messages=messages,
+                temperature=temperature or settings.DEFAULT_TEMPERATURE,
+                max_tokens=settings.DEFAULT_MAX_TOKENS,
+            )
+            return response, selected_model
+        except Exception as error:
+            fallback_model = self._get_fallback_model(selected_model)
+            if self._is_model_not_exist_error(error) and fallback_model:
+                logger.warning(
+                    "⚠️ 模型 {} 不可用，自动回退到 {}",
+                    selected_model,
+                    fallback_model,
+                )
+                response = await llm_client.chat.completions.create(
+                    model=fallback_model,
+                    messages=messages,
+                    temperature=temperature or settings.DEFAULT_TEMPERATURE,
+                    max_tokens=settings.DEFAULT_MAX_TOKENS,
+                )
+                return response, fallback_model
+            raise
+
+    async def _create_stream_with_fallback(
+        self,
+        messages: List[Dict[str, str]],
+        model: Optional[str],
+        temperature: Optional[float],
+    ) -> tuple[Any, str]:
+        """创建流式补全，模型不存在时自动回退。"""
+        llm_client = self._get_llm_client()
+        selected_model = model or settings.DEFAULT_MODEL
+
+        try:
+            stream = await llm_client.chat.completions.create(
+                model=selected_model,
+                messages=messages,
+                temperature=temperature or settings.DEFAULT_TEMPERATURE,
+                max_tokens=settings.DEFAULT_MAX_TOKENS,
+                stream=True,
+            )
+            return stream, selected_model
+        except Exception as error:
+            fallback_model = self._get_fallback_model(selected_model)
+            if self._is_model_not_exist_error(error) and fallback_model:
+                logger.warning(
+                    "⚠️ 流式模型 {} 不可用，自动回退到 {}",
+                    selected_model,
+                    fallback_model,
+                )
+                stream = await llm_client.chat.completions.create(
+                    model=fallback_model,
+                    messages=messages,
+                    temperature=temperature or settings.DEFAULT_TEMPERATURE,
+                    max_tokens=settings.DEFAULT_MAX_TOKENS,
+                    stream=True,
+                )
+                return stream, fallback_model
+            raise
 
     async def query(
         self,
@@ -67,26 +159,43 @@ class RAGService:
         search_results = await vector_store.search(
             query=query_text,
             n_results=top_k,
-            where={"user_id": str(user_id)} if user_id else None,
+            # 文档入库时 user_id 以 int 写入 metadata，这里保持同类型避免过滤失效。
+            where={"user_id": user_id} if user_id else None,
         )
+        raw_results_count = len(search_results)
 
         retrieval_time = (time.time() - retrieval_start) * 1000
 
         # 过滤低分结果
-        if score_threshold:
+        if score_threshold is not None:
             search_results = [
                 r for r in search_results
                 if r.get("distance", 1) <= score_threshold
             ]
+            logger.info(
+                "🔎 阈值过滤完成: threshold={}, before={}, after={}",
+                score_threshold,
+                raw_results_count,
+                len(search_results),
+            )
 
         if not search_results:
             logger.warning("⚠️ 未找到相关文档")
+            total_time = (time.time() - start_time) * 1000
+            answer = "抱歉，我没有找到相关的文档来回答您的问题。"
+            if score_threshold is not None and raw_results_count > 0:
+                answer = (
+                    f"已检索到 {raw_results_count} 条候选文档，但被 score_threshold={score_threshold} 全部过滤。"
+                    "建议调大该值或不传该参数后重试。"
+                )
             return {
-                "answer": "抱歉，我没有找到相关的文档来回答您的问题。",
+                "answer": answer,
                 "sources": [],
                 "confidence": 0.0,
                 "retrieval_time_ms": int(retrieval_time),
                 "generation_time_ms": 0,
+                "total_time_ms": int(total_time),
+                "tokens_used": {},
             }
 
         logger.info(f"✅ 检索完成，找到 {len(search_results)} 个相关文档块")
@@ -126,29 +235,28 @@ class RAGService:
         # 4. 调用 LLM
         logger.info(f"🤖 开始生成答案...")
         generation_start = time.time()
+        used_model = model or settings.DEFAULT_MODEL
 
         try:
-            llm_client = self._get_llm_client()
-
-            response = await llm_client.chat.completions.create(
-                model=model or settings.DEFAULT_MODEL,
+            response, used_model = await self._create_completion_with_fallback(
                 messages=[
                     {"role": "system", "content": system_prompt.format(context=context)},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=temperature or settings.DEFAULT_TEMPERATURE,
-                max_tokens=settings.DEFAULT_MAX_TOKENS,
+                model=model,
+                temperature=temperature,
             )
 
-            answer = response.choices[0].message.content
+            answer = response.choices[0].message.content or ""
+            usage = response.usage
             tokens_used = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens,
+                "prompt_tokens": usage.prompt_tokens if usage else 0,
+                "completion_tokens": usage.completion_tokens if usage else 0,
+                "total_tokens": usage.total_tokens if usage else 0,
             }
 
         except Exception as e:
-            logger.error(f"❌ LLM 调用失败: {e}")
+            logger.error(f"❌ LLM 调用失败（model={used_model}）: {e}")
             answer = "抱歉，生成答案时出现错误，请稍后重试。"
             tokens_used = {}
 
@@ -166,6 +274,7 @@ class RAGService:
                 conversation_id=conversation_id,
                 query=query_text,
                 answer=answer,
+                model_name=used_model,
                 tokens_used=tokens_used,
                 latency_ms=int(total_time),
             )
@@ -206,6 +315,7 @@ class RAGService:
         conversation_id: int,
         query: str,
         answer: str,
+        model_name: str,
         tokens_used: Dict[str, int],
         latency_ms: int,
     ) -> None:
@@ -235,7 +345,7 @@ class RAGService:
                 role="assistant",
                 content=answer,
                 content_type="text",
-                model_name=settings.DEFAULT_MODEL,
+                model_name=model_name,
                 total_tokens=tokens_used.get("total_tokens"),
                 prompt_tokens=tokens_used.get("prompt_tokens"),
                 completion_tokens=tokens_used.get("completion_tokens"),
@@ -243,15 +353,14 @@ class RAGService:
             )
             self.db.add(assistant_message)
 
-            # 更新会话统计
+            # 使用 ORM update 避免 SQL 注入，参数由 SQLAlchemy 绑定
             await self.db.execute(
-                f"""
-                UPDATE conversations
-                SET message_count = message_count + 2,
-                    total_tokens = total_tokens + {tokens_used.get('total_tokens', 0)},
-                    updated_at = NOW()
-                WHERE id = {conversation_id}
-                """
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(
+                    message_count=Conversation.message_count + 2,
+                    total_tokens=Conversation.total_tokens + tokens_used.get("total_tokens", 0),
+                )
             )
 
             await self.db.commit()
@@ -260,6 +369,97 @@ class RAGService:
         except Exception as e:
             logger.error(f"❌ 保存对话记录失败: {e}")
             await self.db.rollback()
+
+    async def stream_query(
+        self,
+        query_text: str,
+        user_id: int,
+        conversation_id: Optional[int] = None,
+        top_k: int = 5,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        RAG 流式查询（SSE），先检索文档，再用 LLM 流式生成答案
+
+        Yields:
+            SSE 格式的 JSON 字符串事件
+        """
+        # 1. 向量检索
+        vector_store = await get_vector_store()
+        search_results = await vector_store.search(
+            query=query_text,
+            n_results=top_k,
+            # 与 query() 保持一致，避免 metadata 类型不一致导致漏检。
+            where={"user_id": user_id} if user_id else None,
+        )
+
+        if not search_results:
+            yield f"data: {json.dumps({'type': 'error', 'content': '未找到相关文档'}, ensure_ascii=False)}\n\n"
+            return
+
+        # 构建检索结果事件（提前返回来源信息）
+        sources = [
+            {
+                "content": r.get("content", "")[:200],
+                "metadata": r.get("metadata", {}),
+                "score": r.get("distance", 0),
+            }
+            for r in search_results
+        ]
+        yield f"data: {json.dumps({'type': 'sources', 'content': sources}, ensure_ascii=False)}\n\n"
+
+        # 2. 构建上下文与提示词
+        context = "\n\n".join(
+            f"[文档{i+1}] {r.get('content', '')}"
+            for i, r in enumerate(search_results)
+        )
+        system_prompt = (
+            "你是一个专业的AI助手，擅长根据提供的文档内容回答用户问题。\n\n"
+            "请遵循以下原则：\n"
+            "1. 只使用提供的文档内容来回答问题\n"
+            "2. 如果文档中没有相关信息，明确告知用户\n"
+            "3. 回答时要准确、客观，引用文档中的具体内容\n\n"
+            f"文档内容：\n{context}"
+        )
+
+        # 3. LLM 流式生成
+        full_answer = []
+        used_model = model or settings.DEFAULT_MODEL
+        try:
+            stream, used_model = await self._create_stream_with_fallback(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"问题：{query_text}"},
+                ],
+                model=model,
+                temperature=temperature,
+            )
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    full_answer.append(delta.content)
+                    yield f"data: {json.dumps({'type': 'token', 'content': delta.content}, ensure_ascii=False)}\n\n"
+
+        except Exception as e:
+            logger.error(f"❌ 流式 LLM 调用失败: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+            return
+
+        # 4. 保存对话记录
+        if conversation_id and full_answer:
+            answer_text = "".join(full_answer)
+            await self._save_conversation(
+                conversation_id=conversation_id,
+                query=query_text,
+                answer=answer_text,
+                model_name=used_model,
+                tokens_used={},
+                latency_ms=0,
+            )
+
+        yield f"data: {json.dumps({'type': 'done', 'content': ''}, ensure_ascii=False)}\n\n"
 
 
 __all__ = ["RAGService"]

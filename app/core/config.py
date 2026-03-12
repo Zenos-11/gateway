@@ -53,12 +53,12 @@ class Settings(BaseSettings):
     )
 
     # ===== OpenAI API 配置 =====
-    OPENAI_API_KEY: str = Field(default="", description="OpenAI API Key")
+    OPENAI_API_KEY: str = Field(default="sk-4d6e671585284c19b12a2fa9eba546b3", description="OpenAI API Key")
     OPENAI_API_BASE: str = Field(
-        default="https://api.openai.com/v1",
-        description="OpenAI API Base URL"
+        default="https://api.deepseek.com",
+        description="DEEPSEEK API Base URL"
     )
-    DEFAULT_MODEL: str = Field(default="gpt-3.5-turbo", description="默认模型")
+    DEFAULT_MODEL: str = Field(default="deepseek-chat", description="默认模型")
     DEFAULT_TEMPERATURE: float = Field(default=0.7, description="默认温度")
     DEFAULT_MAX_TOKENS: int = Field(default=2000, description="默认最大 Token 数")
 

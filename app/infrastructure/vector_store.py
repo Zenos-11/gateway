@@ -112,6 +112,20 @@ class VectorStore:
         self.collection = None
         self.embedding_function = build_embedding_function()
 
+    @staticmethod
+    def _is_collection_already_exists_error(error: Exception) -> bool:
+        """判断是否是集合已存在错误（并发创建时常见）。"""
+        return "already exists" in str(error).lower()
+
+    @staticmethod
+    def _is_embedding_function_conflict_error(error: Exception) -> bool:
+        """判断是否是 embedding 函数冲突错误。"""
+        error_text = str(error).lower()
+        return (
+            "embedding function conflict" in error_text
+            or "embedding function already exists" in error_text
+        )
+
     async def connect(self) -> None:
         """连接到 ChromaDB"""
         try:
@@ -125,20 +139,75 @@ class VectorStore:
                 )
             )
 
-            # 获取或创建集合
-            try:
-                self.collection = self.client.get_collection(
-                    name=self.collection_name,
-                    embedding_function=self.embedding_function,
-                )
-                logger.info(f"✅ 连接到现有集合: {self.collection_name}")
-            except Exception:
-                self.collection = self.client.create_collection(
-                    name=self.collection_name,
-                    metadata={"description": "Document chunks for RAG"},
-                    embedding_function=self.embedding_function,
-                )
-                logger.info(f"✅ 创建新集合: {self.collection_name}")
+            # 优先使用原生幂等接口，避免并发创建导致“already exists”异常
+            if hasattr(self.client, "get_or_create_collection"):
+                try:
+                    self.collection = self.client.get_or_create_collection(
+                        name=self.collection_name,
+                        metadata={"description": "Document chunks for RAG"},
+                        embedding_function=self.embedding_function,
+                    )
+                    logger.info(f"✅ 集合就绪: {self.collection_name}")
+                except Exception as collection_error:
+                    if self._is_embedding_function_conflict_error(collection_error):
+                        logger.warning(
+                            "⚠️ 检测到 embedding 函数冲突，改为复用集合已有配置"
+                        )
+                        self.collection = self.client.get_or_create_collection(
+                            name=self.collection_name,
+                            metadata={"description": "Document chunks for RAG"},
+                        )
+                        logger.info(
+                            f"✅ 已使用集合持久化 embedding 配置: {self.collection_name}"
+                        )
+                    else:
+                        raise
+            else:
+                # 兼容旧版本 Chroma：先查后建，建失败时再回退查询
+                try:
+                    try:
+                        self.collection = self.client.get_collection(
+                            name=self.collection_name,
+                            embedding_function=self.embedding_function,
+                        )
+                    except Exception as get_error:
+                        if self._is_embedding_function_conflict_error(get_error):
+                            logger.warning(
+                                "⚠️ 检测到 embedding 函数冲突，改为复用集合已有配置"
+                            )
+                            self.collection = self.client.get_collection(
+                                name=self.collection_name,
+                            )
+                        else:
+                            raise
+                    logger.info(f"✅ 连接到现有集合: {self.collection_name}")
+                except Exception:
+                    try:
+                        self.collection = self.client.create_collection(
+                            name=self.collection_name,
+                            metadata={"description": "Document chunks for RAG"},
+                            embedding_function=self.embedding_function,
+                        )
+                        logger.info(f"✅ 创建新集合: {self.collection_name}")
+                    except Exception as create_error:
+                        if self._is_collection_already_exists_error(create_error):
+                            try:
+                                self.collection = self.client.get_collection(
+                                    name=self.collection_name,
+                                    embedding_function=self.embedding_function,
+                                )
+                            except Exception as get_error:
+                                if self._is_embedding_function_conflict_error(get_error):
+                                    self.collection = self.client.get_collection(
+                                        name=self.collection_name,
+                                    )
+                                else:
+                                    raise
+                            logger.info(
+                                f"✅ 检测到并发创建，已回退连接现有集合: {self.collection_name}"
+                            )
+                        else:
+                            raise
 
         except Exception as e:
             logger.error(f"❌ ChromaDB 连接失败: {e}")

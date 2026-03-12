@@ -1,10 +1,11 @@
 """
 RAG 问答 API 路由
-提供智能问答功能
+提供智能问答功能（含流式 SSE 端点）
 """
-from typing import Optional
+from typing import Optional, AsyncGenerator
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +22,11 @@ class RAGQueryRequest(BaseModel):
     query: str = Field(..., description="查询问题", min_length=1, max_length=1000)
     conversation_id: Optional[int] = Field(None, description="会话 ID（用于多轮对话）")
     top_k: int = Field(5, description="检索文档数量", ge=1, le=20)
-    score_threshold: Optional[float] = Field(None, description="相似度阈值（0-1）", ge=0, le=1)
+    score_threshold: Optional[float] = Field(
+        None,
+        description="向量距离阈值（越小越严格，建议 1.2-1.8；不传则不过滤）",
+        ge=0,
+    )
     model: Optional[str] = Field(None, description="使用的模型")
     temperature: Optional[float] = Field(0.7, description="温度参数", ge=0, le=2)
 
@@ -150,3 +155,55 @@ async def get_rag_history(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取查询历史失败: {str(e)}"
         )
+
+
+@router.post("/rag/query/stream", summary="RAG 流式智能问答（SSE）")
+async def rag_query_stream(
+    request: RAGQueryRequest,
+    current_user: User = Depends(require_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    基于文档的流式智能问答（Server-Sent Events）
+
+    客户端接收 SSE 事件流，事件格式：
+    - `sources`: 检索到的来源文档（首先返回）
+    - `token`: LLM 逐字输出的文本片段
+    - `error`: 发生错误
+    - `done`: 流式传输完成
+
+    前端使用方式：
+    ```javascript
+    const evtSource = new EventSource('/api/v1/rag/query/stream');
+    evtSource.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        if (data.type === 'token') outputBuffer += data.content;
+    };
+    ```
+    """
+    async def _event_generator() -> AsyncGenerator[str, None]:
+        try:
+            rag_service = RAGService(db)
+            async for event_chunk in rag_service.stream_query(
+                query_text=request.query,
+                user_id=current_user.id,
+                conversation_id=request.conversation_id,
+                top_k=request.top_k,
+                model=request.model,
+                temperature=request.temperature,
+            ):
+                yield event_chunk
+        except Exception as e:
+            import json
+            logger.error(f"❌ RAG 流式查询失败: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            # 禁用缓存，确保 SSE 实时推送到客户端
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # 告知 Nginx 不缓冲 SSE 响应
+        },
+    )

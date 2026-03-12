@@ -113,14 +113,14 @@ app.add_exception_handler(AppException, app_exception_handler)
 app.add_exception_handler(Exception, general_exception_handler)
 
 # ===== 注册路由 =====
-from app.api.v1 import auth, documents, rag
+from app.api.v1 import auth, documents, rag, conversations
+from app.api import routes as agent_routes
 
 app.include_router(auth.router, prefix="/api/v1", tags=["认证"])
 app.include_router(documents.router, prefix="/api/v1", tags=["文档管理"])
 app.include_router(rag.router, prefix="/api/v1", tags=["RAG问答"])
-# 注意：多Agent、对话管理路由将在后续添加
-# app.include_router(agents.router, prefix="/api/v1", tags=["多Agent协作"])
-# app.include_router(conversations.router, prefix="/api/v1", tags=["对话管理"])
+app.include_router(conversations.router, prefix="/api/v1", tags=["会话管理"])
+app.include_router(agent_routes.router, prefix="/api/v1", tags=["多Agent协作"])
 
 
 # ===== 基础端点 =====
