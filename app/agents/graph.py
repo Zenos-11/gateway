@@ -13,8 +13,6 @@
 
 状态机中唯一共享的状态是 AgentState，多个节点通过对它的读写来传递信息。
 """
-import json
-import os
 from typing import Annotated, Any, AsyncGenerator, Dict, Optional, Sequence, TypedDict
 
 import operator
@@ -22,7 +20,7 @@ from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, System
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
-from app.agents.tools import RAG_TOOLS, CODE_TOOLS, UTILITY_TOOLS
+from app.agents.tools import RAG_TOOLS, UTILITY_TOOLS
 from app.core.config import settings
 from app.core.logger import logger
 
@@ -42,6 +40,23 @@ class AgentState(TypedDict):
     user_input: str
     # 用户 ID（用于 RAG 检索时按用户隔离数据）
     user_id: Optional[int]
+    # 外部强制路由（来自 API mode），None 表示由 supervisor 自动判断
+    forced_agent: Optional[str]
+
+
+def _normalize_mode_to_agent(mode: str | None) -> Optional[str]:
+    """将 API mode 规范化为图内节点名。"""
+    if not mode:
+        return None
+
+    normalized_mode = mode.strip().lower()
+    mapping = {
+        "auto": None,
+        "rag": "rag_agent",
+        "code": "code_agent",
+        "general": "general_agent",
+    }
+    return mapping.get(normalized_mode)
 
 
 # ===== LLM 工厂 =====
@@ -116,6 +131,17 @@ async def supervisor_node(state: AgentState) -> Dict:
     意图分类：rag_agent / code_agent / general_agent
     """
     user_input = state.get("user_input", "")
+    forced_agent = state.get("forced_agent")
+
+    # 当 API 指定 mode=rag/code/general 时，直接按外部策略路由
+    if forced_agent in {"rag_agent", "code_agent", "general_agent"}:
+        logger.info("🧭 Supervisor 使用强制路由: {}", forced_agent)
+        return {
+            "next_agent": forced_agent,
+            "messages": [
+                AIMessage(content=f"[Supervisor] 使用外部强制路由: {forced_agent}", name="supervisor")
+            ],
+        }
 
     # 使用 LLM 分类器而非关键词路由，更准确地理解用户意图
     llm = _build_llm(temperature=0.0)  # temperature=0 保证路由结果稳定可预测
@@ -304,6 +330,7 @@ async def run_agent_stream(
     user_message: str,
     conversation_history: list[dict] | None = None,
     user_id: int | None = None,
+    mode: str = "auto",
 ) -> AsyncGenerator[Dict, None]:
     """
     以流式模式运行 Agent 图，逐步 yield 格式化事件字典。
@@ -317,6 +344,7 @@ async def run_agent_stream(
         conversation_history: 历史消息列表（可选），格式:
             [{"role": "user" | "assistant", "content": "..."}]
         user_id: 当前用户 ID（传递给 RAG 检索以隔离数据）
+        mode: 路由模式（auto/rag/code/general）
 
     Yields:
         统一格式的事件字典：
@@ -338,6 +366,7 @@ async def run_agent_stream(
         "next_agent": "",
         "user_input": user_message,
         "user_id": user_id,
+        "forced_agent": _normalize_mode_to_agent(mode),
     }
 
     # astream_events v2：每个 LLM token 都会产生 on_chat_model_stream 事件
@@ -382,6 +411,7 @@ async def run_agent(
     user_message: str,
     conversation_history: list[dict] | None = None,
     user_id: int | None = None,
+    mode: str = "auto",
 ) -> str:
     """
     同步（非流式）运行 Agent 图，等待所有节点完成后返回最终答案文本。
@@ -390,6 +420,7 @@ async def run_agent(
         user_message: 用户当前输入
         conversation_history: 历史消息列表（可选）
         user_id: 当前用户 ID
+        mode: 路由模式（auto/rag/code/general）
 
     Returns:
         最终 Agent 输出的文本内容
@@ -409,6 +440,7 @@ async def run_agent(
         "next_agent": "",
         "user_input": user_message,
         "user_id": user_id,
+        "forced_agent": _normalize_mode_to_agent(mode),
     }
 
     final_state = await agent_graph.ainvoke(initial_state)
@@ -417,5 +449,7 @@ async def run_agent(
     for msg in reversed(final_state.get("messages", [])):
         if isinstance(msg, AIMessage) and getattr(msg, "name", "") != "supervisor":
             return msg.content
+
+    return ""
 
 __all__ = ["AgentState", "agent_graph", "run_agent", "run_agent_stream", "create_agent_graph"]
